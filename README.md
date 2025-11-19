@@ -1,6 +1,6 @@
 # FDA PH Scraper
 
-Collection of tools that scrape the FDA Philippines food and drug catalogs, normalise the output, and drop the resulting CSVs under `inputs/drugs/`. This folder is intended to become its own GitHub submodule (`carlosresu/fda_ph_scraper`) so it can be shared across projects; the current copy mirrors the content that would live inside that submodule.
+Collection of tools that scrape the FDA Philippines food and drug catalogs, normalise the output, and drop the resulting CSVs under this module’s own `output/` directory. Downstream automation (e.g., `run_all.py`) then mirrors those exports into `inputs/drugs/`. This folder is intended to become its own GitHub submodule (`carlosresu/fda_ph_scraper`) so it can be shared across projects; the current copy mirrors the content that would live inside that submodule.
 
 ## Layout
 
@@ -23,11 +23,11 @@ python install_requirements.py
 Files can be executed directly (the module automatically locates the repository root even when run from within the submodule) or via `python -m`:
 
 ```bash
-python -m dependencies.fda_ph_scraper.food_scraper --outdir ../inputs/drugs
-python -m dependencies.fda_ph_scraper.drug_scraper --outdir ../inputs/drugs --outfile inputs/drugs/fda_brand_map_latest.csv
+python -m dependencies.fda_ph_scraper.food_scraper      # writes to dependencies/fda_ph_scraper/output/fda_food_products.csv
+python -m dependencies.fda_ph_scraper.drug_scraper      # writes brand maps to dependencies/fda_ph_scraper/output/fda_brand_map_<date>.csv
 ```
 
-Each scraper writes raw artifacts under the root-level `raw/` directory so the raw HTTP responses stay outside the submodule tree.
+Each scraper writes raw artifacts under `dependencies/fda_ph_scraper/raw/` so the HTTP downloads stay inside the submodule tree. To feed eSOA directly, copy whatever you need from the module’s `output/` folder into `../inputs/drugs/`.
 
 ## Publishing as a Submodule
 

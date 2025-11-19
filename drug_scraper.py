@@ -15,9 +15,9 @@ import requests
 from .text_utils import normalize_text
 from .routes_forms import FORM_TO_ROUTE, parse_form_from_text
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INPUTS_DIR = REPO_ROOT / "inputs" / "drugs"
-RAW_DIR = REPO_ROOT / "raw"
+MODULE_ROOT = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_DIR = MODULE_ROOT / "output"
+RAW_DIR = MODULE_ROOT / "raw"
 
 BASE_URL = "https://verification.fda.gov.ph"
 HUMAN_DRUGS_URL = f"{BASE_URL}/drug_productslist.php"
@@ -214,7 +214,7 @@ def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
 def main() -> None:
     """CLI wrapper that downloads, normalizes, and writes the brand-map export."""
     ap = argparse.ArgumentParser(description="Build FDA PH brand→generic map (CSV export only)")
-    ap.add_argument("--outdir", default=str(DEFAULT_INPUTS_DIR), help="Output directory")
+    ap.add_argument("--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory")
     ap.add_argument("--outfile", default=None, help="Optional explicit output CSV filename")
     args = ap.parse_args()
 

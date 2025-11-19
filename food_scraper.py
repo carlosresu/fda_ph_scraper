@@ -17,9 +17,9 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INPUTS_DIR = REPO_ROOT / "inputs" / "drugs"
-RAW_DIR = REPO_ROOT / "raw"
+MODULE_ROOT = Path(__file__).resolve().parent
+DEFAULT_OUTPUT_DIR = MODULE_ROOT / "output"
+RAW_DIR = MODULE_ROOT / "raw"
 
 BASE_URL = "https://verification.fda.gov.ph"
 FOOD_PRODUCTS_URL = f"{BASE_URL}/All_FoodProductslist.php"
@@ -454,7 +454,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Scrape the FDA Philippines food product catalog via paginated 100-row views."
     )
-    parser.add_argument("--outdir", default=str(DEFAULT_INPUTS_DIR), help="Directory for the processed CSV")
+    parser.add_argument("--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for the processed CSV")
     parser.add_argument("--outfile", default="fda_food_products.csv", help="Processed output filename")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Optional per-request timeout (seconds)")
     parser.add_argument("--force", action="store_true", help="Force re-scraping even if output exists")
