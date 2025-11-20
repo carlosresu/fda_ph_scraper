@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 import csv
 import re
+import shutil
 from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import requests
 
 from .text_utils import normalize_text
@@ -213,7 +216,7 @@ def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
 def main() -> None:
     """CLI wrapper that downloads, normalizes, and writes the brand-map export."""
-    ap = argparse.ArgumentParser(description="Build FDA PH brand→generic map (CSV export only)")
+    ap = argparse.ArgumentParser(description="Build FDA PH brand→generic map (CSV + Parquet export)")
     ap.add_argument("--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory")
     ap.add_argument("--outfile", default=None, help="Optional explicit output CSV filename")
     args = ap.parse_args()
@@ -224,16 +227,25 @@ def main() -> None:
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-
-    out_csv = Path(args.outfile) if args.outfile else outdir / f"fda_brand_map_{Path.cwd().name}.csv"
-    # Use explicit filename if provided; otherwise the caller supplies one via subprocess args
+    date_tag = catalog_date.isoformat()
+    out_csv = Path(args.outfile) if args.outfile else outdir / f"fda_drug_{date_tag}.csv"
 
     fieldnames = ["brand_name", "generic_name", "dosage_form", "route", "dosage_strength", "registration_number"]
     with out_csv.open("w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        # Stream rows to disk preserving the deduped ordering.
-        w.writerows(brand_map)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(brand_map)
+    table = pa.Table.from_pylist(brand_map, schema=pa.schema([(name, pa.string()) for name in fieldnames]))
+    pq.write_table(table, out_csv.with_suffix(".parquet"))
+
+    inputs_dir = MODULE_ROOT.parent.parent / "inputs" / "drugs"
+    try:
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        for path in [out_csv, out_csv.with_suffix(".parquet")]:
+            if path.is_file():
+                shutil.copy2(path, inputs_dir / path.name)
+    except Exception:
+        pass
 
     status_note = "downloaded" if downloaded else "reused cached"
     print(f"FDA PH drug catalog ({catalog_date.isoformat()}) {status_note}: raw={raw_path}")
