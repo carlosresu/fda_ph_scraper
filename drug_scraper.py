@@ -4,15 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import csv
+import io
 import re
 import shutil
 from datetime import datetime, date
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import polars as pl
 import requests
 
 from .text_utils import normalize_text
@@ -82,18 +81,22 @@ def _existing_raw_dates(raw_dir: Path) -> List[Tuple[date, Path]]:
     return items
 
 
-def _parse_csv_rows(lines: Iterable[str]) -> List[Dict[str, str]]:
-    """Parse CSV text into a list of dictionaries with trimmed keys/values."""
-    reader = csv.DictReader(lines)
-    rows: List[Dict[str, str]] = []
-    for row in reader:
-        rows.append({k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
-    if not rows:
+def _parse_csv_rows(text: str) -> pl.DataFrame:
+    """Parse CSV text into a Polars DataFrame with trimmed column names."""
+
+    try:
+        df = pl.read_csv(io.StringIO(text))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Unable to parse FDA export CSV: {exc}") from exc
+
+    if df.is_empty():
         raise RuntimeError("FDA export returned no rows.")
-    return rows
+
+    rename_map = {name: name.strip() for name in df.columns}
+    return df.rename(rename_map)
 
 
-def fetch_csv_export() -> Tuple[List[Dict[str, str]], date, Path, bool]:
+def fetch_csv_export() -> Tuple[pl.DataFrame, date, Path, bool]:
     """Download (or reuse) the FDA PH drug CSV export.
 
     Returns:
@@ -133,12 +136,13 @@ def fetch_csv_export() -> Tuple[List[Dict[str, str]], date, Path, bool]:
                 raw_path.write_text(text, encoding="utf-8")
                 downloaded = True
 
-    rows = _parse_csv_rows(text.splitlines())
+    rows = _parse_csv_rows(text)
     return rows, target_date, raw_path, downloaded
 
 
-def normalize_columns(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def normalize_columns(df: pl.DataFrame) -> pl.DataFrame:
     """Rename raw FDA columns into predictable snake_case keys."""
+
     key_map = {
         "Registration Number": "registration_number",
         "Generic Name": "generic_name",
@@ -153,15 +157,15 @@ def normalize_columns(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
         "Expiry Date": "expiry_date",
         "Product Information": "product_information",
     }
-    out: List[Dict[str, str]] = []
-    for r in rows:
-        nr: Dict[str, str] = {}
-        for k, v in r.items():
-            kk = key_map.get(k, k.lower().replace(" ", "_"))
-            # Map or fallback to a deterministic snake_case key.
-            nr[kk] = v
-        out.append(nr)
-    return out
+
+    rename_map: Dict[str, str] = {}
+    for name in df.columns:
+        mapped = key_map.get(name)
+        if not mapped:
+            mapped = name.lower().replace(" ", "_")
+        rename_map[name] = mapped
+
+    return df.rename(rename_map)
 
 
 def infer_form_and_route(dosage_form: Optional[str]) -> (Optional[str], Optional[str]):
@@ -174,44 +178,73 @@ def infer_form_and_route(dosage_form: Optional[str]) -> (Optional[str], Optional
     return form_token, route
 
 
-def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def build_brand_map(df: pl.DataFrame) -> pl.DataFrame:
     """Trim, dedupe, and enrich FDA rows for downstream brand→generic lookups."""
-    seen = set()
-    out: List[Dict[str, str]] = []
-    for r in rows:
-        brand = (r.get("brand_name") or "").strip()
-        generic = (r.get("generic_name") or "").strip()
-        if not brand or not generic:
-            continue
 
-        dosage_form = (r.get("dosage_form") or "").strip()
-        dosage_strength = (r.get("dosage_strength") or "").strip()
-        regno = (r.get("registration_number") or "").strip()
+    working = df.with_columns(
+        [
+            pl.col("brand_name").cast(pl.Utf8).fill_null("").str.strip().alias("brand_name"),
+            pl.col("generic_name").cast(pl.Utf8).fill_null("").str.strip().alias("generic_name"),
+            pl.col("dosage_form").cast(pl.Utf8).fill_null("").str.strip().alias("dosage_form"),
+            pl.col("dosage_strength").cast(pl.Utf8).fill_null("").str.strip().alias("dosage_strength"),
+            pl.col("registration_number")
+            .cast(pl.Utf8)
+            .fill_null("")
+            .str.strip()
+            .alias("registration_number"),
+        ]
+    ).with_columns(
+        [
+            pl.col("dosage_form")
+            .map_elements(lambda val: infer_form_and_route(val)[0], return_dtype=pl.Utf8)
+            .alias("dosage_form_token"),
+            pl.col("dosage_form")
+            .map_elements(lambda val: infer_form_and_route(val)[1], return_dtype=pl.Utf8)
+            .alias("route"),
+        ]
+    )
 
-        form_token, route = infer_form_and_route(dosage_form)
+    working = working.filter((pl.col("brand_name") != "") & (pl.col("generic_name") != ""))
 
-        key = (
-            brand.lower(),
-            generic.lower(),
-            (form_token or "").lower(),
-            (route or "").lower(),
-            dosage_strength.lower(),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
+    working = working.with_columns(
+        [
+            pl.when(pl.col("dosage_form_token").is_not_null() & (pl.col("dosage_form_token") != ""))
+            .then(pl.col("dosage_form_token"))
+            .otherwise(pl.col("dosage_form"))
+            .fill_null("")
+            .alias("dosage_form"),
+            pl.col("route").fill_null("").str.strip().alias("route"),
+        ]
+    )
 
-        out.append(
-            {
-                "brand_name": brand,
-                "generic_name": generic,
-                "dosage_form": form_token or dosage_form or "",
-                "route": route or "",
-                "dosage_strength": dosage_strength,
-                "registration_number": regno,
-            }
-        )
-    return out
+    working = working.with_columns(
+        [
+            pl.col("brand_name").str.to_lowercase().alias("_brand_key"),
+            pl.col("generic_name").str.to_lowercase().alias("_generic_key"),
+            pl.col("dosage_form").str.to_lowercase().alias("_dosage_form_key"),
+            pl.col("route").str.to_lowercase().alias("_route_key"),
+            pl.col("dosage_strength").str.to_lowercase().alias("_dosage_strength_key"),
+        ]
+    ).unique(
+        subset=[
+            "_brand_key",
+            "_generic_key",
+            "_dosage_form_key",
+            "_route_key",
+            "_dosage_strength_key",
+        ]
+    )
+
+    return working.select(
+        [
+            "brand_name",
+            "generic_name",
+            "dosage_form",
+            "route",
+            "dosage_strength",
+            "registration_number",
+        ]
+    )
 
 
 def main() -> None:
@@ -228,27 +261,27 @@ def main() -> None:
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     date_tag = catalog_date.isoformat()
-    out_csv = Path(args.outfile) if args.outfile else outdir / f"fda_drug_{date_tag}.csv"
+    out_parquet = Path(args.outfile) if args.outfile else outdir / f"fda_drug_{date_tag}.parquet"
+    if out_parquet.suffix.lower() != ".parquet":
+        out_parquet = out_parquet.with_suffix(".parquet")
+    out_csv = out_parquet.with_suffix(".csv")
 
-    fieldnames = ["brand_name", "generic_name", "dosage_form", "route", "dosage_strength", "registration_number"]
-    with out_csv.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(brand_map)
-    table = pa.Table.from_pylist(brand_map, schema=pa.schema([(name, pa.string()) for name in fieldnames]))
-    pq.write_table(table, out_csv.with_suffix(".parquet"))
+    brand_map.write_parquet(out_parquet)
+    brand_map.write_csv(out_csv)
 
     inputs_dir = MODULE_ROOT.parent.parent / "inputs" / "drugs"
     try:
         inputs_dir.mkdir(parents=True, exist_ok=True)
-        for path in [out_csv, out_csv.with_suffix(".parquet")]:
+        for path in [out_parquet, out_csv]:
             if path.is_file():
                 shutil.copy2(path, inputs_dir / path.name)
     except Exception:
         pass
 
     status_note = "downloaded" if downloaded else "reused cached"
-    print(f"FDA PH drug catalog ({catalog_date.isoformat()}) {status_note}: raw={raw_path}")
+    print(
+        f"FDA PH drug catalog ({catalog_date.isoformat()}) {status_note}: raw={raw_path}, parquet={out_parquet}, csv={out_csv}"
+    )
 
 
 if __name__ == "__main__":
