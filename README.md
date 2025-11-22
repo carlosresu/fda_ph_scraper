@@ -11,7 +11,7 @@ Collection of tools that scrape the FDA Philippines food and drug catalogs, norm
 
 ## Data processing backend
 
-The scrapers exclusively use [Polars](https://pola.rs) for all tabular processing. Parquet is the primary on-disk format for normalized outputs, while CSV copies are also written for debugging and inspection. Inputs are never read from CSV intermediates; the only CSV reads occur when downloading the FDA-provided exports before conversion to Parquet.
+The scrapers exclusively use [Polars](https://pola.rs) for all tabular processing—no pandas dependency is required. Parquet is the primary on-disk format for normalized outputs, while CSV copies are also written for debugging and inspection. Inputs are never read from CSV intermediates; the only CSV reads occur when downloading the FDA-provided exports before conversion to Polars DataFrames and subsequent Parquet writes.
 
 ## Setup
 

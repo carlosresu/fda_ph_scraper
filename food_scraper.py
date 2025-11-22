@@ -593,7 +593,9 @@ def build_catalog(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> pl.DataFrame
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Scrape the FDA Philippines food product catalog via paginated 100-row views."
+        description=(
+            "Scrape the FDA Philippines food product catalog with Polars via paginated 100-row views."
+        )
     )
     parser.add_argument(
         "--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for the processed Parquet export"
