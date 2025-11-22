@@ -52,6 +52,7 @@ PAGE_SIZES = ("100",)
 DEFAULT_TIMEOUT = None
 
 CATALOG_COLUMNS = ["brand_name", "product_name", "company_name", "registration_number"]
+RowsLike = Iterable[Dict[str, str]] | pl.DataFrame
 
 RECORD_SUMMARY_RX = re.compile(r"Records\s+\d+\s+to\s+([\d,]+)\s+of\s+([\d,]+)", re.IGNORECASE)
 
@@ -176,6 +177,7 @@ def _parse_food_rows(html: str) -> Tuple[List[Dict[str, str]], Optional[int]]:
     parser.feed(html)
     return _cells_to_rows(parser.rows), _parse_record_summary(html)
 
+
 def _fetch_total_entries(timeout: Optional[int]) -> Optional[int]:
     """Fetch a single page to read the total entry count."""
     try:
@@ -192,7 +194,7 @@ def _fetch_total_entries(timeout: Optional[int]) -> Optional[int]:
         return None
 
 
-def _rows_to_dataframe(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> pl.DataFrame:
+def _rows_to_dataframe(rows: RowsLike) -> pl.DataFrame:
     if isinstance(rows, pl.DataFrame):
         df = rows
     else:
@@ -209,10 +211,6 @@ def _rows_to_dataframe(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> pl.Data
     ])
 
 
-def _dedupe_rows(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> List[Dict[str, str]]:
-    return build_catalog(rows).to_dicts()
-
-
 def _random_headers() -> Dict[str, str]:
     headers = BASE_HEADERS.copy()
     headers["User-Agent"] = random.choice(USER_AGENTS)
@@ -223,14 +221,14 @@ def _random_headers() -> Dict[str, str]:
     return headers
 
 
-def _load_existing_catalog(path: Path) -> List[Dict[str, str]]:
+def _load_existing_catalog(path: Path) -> pl.DataFrame:
     if not path.is_file():
-        return []
+        return build_catalog([])
     try:
         df = pl.read_parquet(path)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Failed to read existing catalog {path}: {exc}") from exc
-    return _dedupe_rows(df)
+    return build_catalog(df)
 
 
 def _fetch_page(
@@ -409,11 +407,14 @@ def scrape_food_catalog(
     timeout: Optional[int] = DEFAULT_TIMEOUT,
     *,
     verbose: bool = True,
-    existing_rows: Optional[List[Dict[str, str]]] = None,
+    existing_rows: Optional[RowsLike] = None,
     flush: Optional[Callable[[List[Dict[str, str]]], None]] = None,
 ) -> Tuple[List[Dict[str, str]], List[str], str]:
     with requests.Session() as session:
-        aggregated: List[Dict[str, str]] = list(existing_rows or [])
+        if isinstance(existing_rows, pl.DataFrame):
+            aggregated = build_catalog(existing_rows).to_dicts()
+        else:
+            aggregated = list(existing_rows or [])
         seen: set[Tuple[str, str, str, str]] = {_row_key(row) for row in aggregated}
         if verbose and aggregated:
             print(f"Loaded {len(aggregated):,} existing rows; continuing scrape.", flush=True)
@@ -455,7 +456,7 @@ def _normalize_column_name(name: str) -> str:
     return clean
 
 
-def _load_export_file(path: Path) -> List[Dict[str, str]]:
+def _load_export_file(path: Path) -> pl.DataFrame:
     """Load the downloaded export into a Polars DataFrame and normalize columns."""
 
     try:
@@ -498,19 +499,18 @@ def _load_export_file(path: Path) -> List[Dict[str, str]]:
         ]
     )
 
-    return _dedupe_rows(df)
+    return build_catalog(df)
 
 
 def _download_export_if_needed(
     *,
     total_remote: Optional[int],
-    existing_count: int,
     outdir: Path,
     timeout: Optional[int],
     quiet: bool,
 
-) -> Tuple[Optional[List[Dict[str, str]]], Optional[Path], Optional[str]]:
-    """Attempt the official CSV/Excel export and return rows, path, and an error message if any."""
+) -> Tuple[Optional[pl.DataFrame], Optional[Path], Optional[str]]:
+    """Attempt the official CSV/Excel export and return a Polars DataFrame, path, and any error."""
 
     date_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     export_path = outdir / f"fda_food_export_{date_tag}.csv"
@@ -557,27 +557,27 @@ def _download_export_if_needed(
             print(f"[download] Unable to parse Excel export: {exc}", flush=True)
         return None, export_path, str(exc)
 
-    if total_remote is not None and len(rows) < total_remote:
-        gap = total_remote - len(rows)
+    if total_remote is not None and rows.height < total_remote:
+        gap = total_remote - rows.height
         if gap > 5:
             if not quiet:
                 print(
-                    f"[download] Parsed {len(rows):,}/{total_remote:,} rows from export; not all rows present.",
+                    f"[download] Parsed {rows.height:,}/{total_remote:,} rows from export; not all rows present.",
                     flush=True,
                 )
             return None, export_path, "export missing expected rows"
         if not quiet:
             print(
-                f"[download] Parsed {len(rows):,}/{total_remote:,} rows from export; accepting with {gap} missing.",
+                f"[download] Parsed {rows.height:,}/{total_remote:,} rows from export; accepting with {gap} missing.",
                 flush=True,
             )
 
     if not quiet:
-        print(f"[download] Using Excel export with {len(rows):,} rows.", flush=True)
+        print(f"[download] Using Excel export with {rows.height:,} rows.", flush=True)
     return rows, export_path, None
 
 
-def build_catalog(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> pl.DataFrame:
+def build_catalog(rows: RowsLike) -> pl.DataFrame:
     df = _rows_to_dataframe(rows)
     df = df.filter(pl.any_horizontal([pl.col(col) != "" for col in CATALOG_COLUMNS]))
     df = df.with_columns(
@@ -628,7 +628,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    existing_rows: List[Dict[str, str]] = []
+    existing_catalog: Optional[pl.DataFrame] = None
     if out_parquet.exists():
         if args.force:
             if not args.quiet:
@@ -636,14 +636,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             out_parquet.unlink()
             out_csv.unlink(missing_ok=True)
         else:
-            existing_rows = _load_existing_catalog(out_parquet)
+            existing_catalog = _load_existing_catalog(out_parquet)
             if not args.quiet:
                 print(
-                    f"Resuming from {len(existing_rows):,} previously scraped rows at {out_parquet}.",
+                    f"Resuming from {existing_catalog.height:,} previously scraped rows at {out_parquet}.",
                     flush=True,
                 )
 
-    def _flush(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> None:
+    def _flush(rows: RowsLike) -> None:
         catalog_snapshot = build_catalog(rows)
         tmp_parquet = out_parquet.with_suffix(out_parquet.suffix + ".tmp")
         catalog_snapshot.write_parquet(tmp_parquet)
@@ -652,18 +652,23 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Prefer official export when the site advertises more rows than we have locally.
     total_remote = _fetch_total_entries(args.timeout)
-    download_needed = (not existing_rows) or (total_remote is not None and len(existing_rows) < total_remote)
-    download_rows: Optional[List[Dict[str, str]]] = None
+    existing_count = existing_catalog.height if existing_catalog is not None else 0
+    has_existing_rows = existing_catalog is not None and not existing_catalog.is_empty()
+    download_needed = (not has_existing_rows) or (total_remote is not None and existing_count < total_remote)
+    download_rows: Optional[pl.DataFrame] = None
     export_path: Optional[Path] = None
     download_error: Optional[str] = None
     if download_needed:
         download_rows, export_path, download_error = _download_export_if_needed(
             total_remote=total_remote,
-            existing_count=len(existing_rows),
             outdir=outdir,
             timeout=300,
             quiet=args.quiet,
         )
+
+    existing_rows_for_scrape: List[Dict[str, str]] = []
+    if has_existing_rows:
+        existing_rows_for_scrape = existing_catalog.to_dicts()
 
     if download_rows is not None:
         catalog_rows = download_rows
@@ -678,12 +683,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         rows, html_pages, page_size = scrape_food_catalog(
             timeout=args.timeout,
             verbose=not args.quiet,
-            existing_rows=existing_rows,
+            existing_rows=existing_rows_for_scrape,
             flush=_flush,
         )
         catalog_rows = rows
     else:
-        catalog_rows = existing_rows
+        catalog_rows = existing_catalog if existing_catalog is not None else []
         html_pages = []
         page_size = PAGE_SIZES[0]
 
