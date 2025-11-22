@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import random
 import re
 import shutil
@@ -16,8 +15,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import polars as pl
 import requests
 
 MODULE_ROOT = Path(__file__).resolve().parent
@@ -52,6 +50,8 @@ ACCEPT_LANGUAGES = [
 
 PAGE_SIZES = ("100",)
 DEFAULT_TIMEOUT = None
+
+CATALOG_COLUMNS = ["brand_name", "product_name", "company_name", "registration_number"]
 
 RECORD_SUMMARY_RX = re.compile(r"Records\s+\d+\s+to\s+([\d,]+)\s+of\s+([\d,]+)", re.IGNORECASE)
 
@@ -192,16 +192,25 @@ def _fetch_total_entries(timeout: Optional[int]) -> Optional[int]:
         return None
 
 
-def _dedupe_rows(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
-    seen: set[Tuple[str, str, str, str]] = set()
-    unique: List[Dict[str, str]] = []
-    for row in rows:
-        key = _row_key(row)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(row)
-    return unique
+def _rows_to_dataframe(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> pl.DataFrame:
+    if isinstance(rows, pl.DataFrame):
+        df = rows
+    else:
+        rows_list = list(rows)
+        df = pl.DataFrame(rows_list) if rows_list else pl.DataFrame({col: [] for col in CATALOG_COLUMNS})
+
+    for col in CATALOG_COLUMNS:
+        if col not in df.columns:
+            df = df.with_columns(pl.lit("").alias(col))
+
+    df = df.select(CATALOG_COLUMNS)
+    return df.with_columns([
+        pl.col(col).cast(pl.Utf8).fill_null("").str.strip().alias(col) for col in CATALOG_COLUMNS
+    ])
+
+
+def _dedupe_rows(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> List[Dict[str, str]]:
+    return build_catalog(rows).to_dicts()
 
 
 def _random_headers() -> Dict[str, str]:
@@ -217,19 +226,11 @@ def _random_headers() -> Dict[str, str]:
 def _load_existing_catalog(path: Path) -> List[Dict[str, str]]:
     if not path.is_file():
         return []
-    rows: List[Dict[str, str]] = []
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for entry in reader:
-            rows.append(
-                {
-                    "brand_name": (entry.get("brand_name") or "").strip(),
-                    "product_name": (entry.get("product_name") or "").strip(),
-                    "company_name": (entry.get("company_name") or "").strip(),
-                    "registration_number": (entry.get("registration_number") or "").strip(),
-                }
-            )
-    return _dedupe_rows(rows)
+    try:
+        df = pl.read_parquet(path)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Failed to read existing catalog {path}: {exc}") from exc
+    return _dedupe_rows(df)
 
 
 def _fetch_page(
@@ -455,38 +456,49 @@ def _normalize_column_name(name: str) -> str:
 
 
 def _load_export_file(path: Path) -> List[Dict[str, str]]:
-    """Load the downloaded export (CSV text) and coerce to the canonical column set."""
+    """Load the downloaded export into a Polars DataFrame and normalize columns."""
+
     try:
-        text = path.read_text(encoding="utf-8")
+        df_raw = pl.read_csv(path)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"Failed to read export file {path}: {exc}") from exc
 
-    reader = csv.DictReader(text.splitlines())
-    raw_rows = list(reader)
-    if not raw_rows:
+    if df_raw.is_empty():
         raise RuntimeError(f"Failed to read export file {path}: empty payload")
 
-    rows: List[Dict[str, str]] = []
-    for raw in raw_rows:
-        mapped: Dict[str, str] = {
-            "brand_name": "",
-            "product_name": "",
-            "company_name": "",
-            "registration_number": "",
-        }
-        for key, value in raw.items():
-            norm = _normalize_column_name(str(key))
-            val = (value or "").strip() if isinstance(value, str) else "" if value is None else str(value).strip()
-            if "registration" in norm and "number" in norm:
-                mapped["registration_number"] = val
-            elif "company" in norm:
-                mapped["company_name"] = val
-            elif "product" in norm:
-                mapped["product_name"] = val
-            elif "brand" in norm:
-                mapped["brand_name"] = val
-        rows.append(mapped)
-    return _dedupe_rows(rows)
+    column_map: Dict[str, List[str]] = {
+        "registration_number": [],
+        "company_name": [],
+        "product_name": [],
+        "brand_name": [],
+    }
+    for name in df_raw.columns:
+        norm = _normalize_column_name(str(name))
+        if "registration" in norm and "number" in norm:
+            column_map["registration_number"].append(name)
+        elif "company" in norm:
+            column_map["company_name"].append(name)
+        elif "product" in norm:
+            column_map["product_name"].append(name)
+        elif "brand" in norm:
+            column_map["brand_name"].append(name)
+
+    def _coalesce_columns(names: List[str]) -> pl.Expr:
+        if not names:
+            return pl.lit("")
+        exprs = [pl.col(n).cast(pl.Utf8).fill_null("").str.strip() for n in names]
+        return pl.coalesce(exprs).fill_null("")
+
+    df = df_raw.select(
+        [
+            _coalesce_columns(column_map["brand_name"]).alias("brand_name"),
+            _coalesce_columns(column_map["product_name"]).alias("product_name"),
+            _coalesce_columns(column_map["company_name"]).alias("company_name"),
+            _coalesce_columns(column_map["registration_number"]).alias("registration_number"),
+        ]
+    )
+
+    return _dedupe_rows(df)
 
 
 def _download_export_if_needed(
@@ -565,31 +577,27 @@ def _download_export_if_needed(
     return rows, export_path, None
 
 
-def build_catalog(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
-    filtered: List[Dict[str, str]] = []
-    for row in rows:
-        brand = (row.get("brand_name") or "").strip()
-        product = (row.get("product_name") or "").strip()
-        company = (row.get("company_name") or "").strip()
-        reg = (row.get("registration_number") or "").strip()
-        if not (brand or product or company or reg):
-            continue
-        filtered.append(
-            {
-                "brand_name": brand,
-                "product_name": product,
-                "company_name": company,
-                "registration_number": reg,
-            }
-        )
-    return _dedupe_rows(filtered)
+def build_catalog(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> pl.DataFrame:
+    df = _rows_to_dataframe(rows)
+    df = df.filter(pl.any_horizontal([pl.col(col) != "" for col in CATALOG_COLUMNS]))
+    df = df.with_columns(
+        [
+            pl.col("brand_name").str.to_lowercase().alias("_brand_key"),
+            pl.col("product_name").str.to_lowercase().alias("_product_key"),
+            pl.col("company_name").str.to_lowercase().alias("_company_key"),
+            pl.col("registration_number").str.to_lowercase().alias("_reg_key"),
+        ]
+    ).unique(subset=["_brand_key", "_product_key", "_company_key", "_reg_key"], keep="first")
+    return df.select(CATALOG_COLUMNS)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Scrape the FDA Philippines food product catalog via paginated 100-row views."
     )
-    parser.add_argument("--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for the processed CSV")
+    parser.add_argument(
+        "--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Directory for the processed Parquet export"
+    )
     parser.add_argument("--outfile", default=None, help="Processed output filename (defaults to timestamped)")
     parser.add_argument(
         "--timeout",
@@ -609,36 +617,36 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     outdir = Path(args.outdir)
     run_tag = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    outfile = args.outfile or f"fda_food_{run_tag}.csv"
-    out_csv = outdir / outfile
+    outfile = args.outfile or f"fda_food_{run_tag}.parquet"
+    out_parquet = outdir / outfile
+    if out_parquet.suffix.lower() != ".parquet":
+        out_parquet = out_parquet.with_suffix(".parquet")
+    out_csv = out_parquet.with_suffix(".csv")
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     outdir.mkdir(parents=True, exist_ok=True)
 
     existing_rows: List[Dict[str, str]] = []
-    if out_csv.exists():
+    if out_parquet.exists():
         if args.force:
             if not args.quiet:
-                print(f"Discarding existing catalog at {out_csv} (--force).", flush=True)
-            out_csv.unlink()
+                print(f"Discarding existing catalog at {out_parquet} (--force).", flush=True)
+            out_parquet.unlink()
+            out_csv.unlink(missing_ok=True)
         else:
-            existing_rows = _load_existing_catalog(out_csv)
+            existing_rows = _load_existing_catalog(out_parquet)
             if not args.quiet:
                 print(
-                    f"Resuming from {len(existing_rows):,} previously scraped rows at {out_csv}.",
+                    f"Resuming from {len(existing_rows):,} previously scraped rows at {out_parquet}.",
                     flush=True,
                 )
 
-    fieldnames = ["brand_name", "product_name", "company_name", "registration_number"]
-
-    def _flush(rows: List[Dict[str, str]]) -> None:
+    def _flush(rows: Iterable[Dict[str, str]] | pl.DataFrame) -> None:
         catalog_snapshot = build_catalog(rows)
-        tmp_path = out_csv.with_suffix(out_csv.suffix + ".tmp")
-        with tmp_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(catalog_snapshot)
-        tmp_path.replace(out_csv)
+        tmp_parquet = out_parquet.with_suffix(out_parquet.suffix + ".tmp")
+        catalog_snapshot.write_parquet(tmp_parquet)
+        catalog_snapshot.write_csv(out_csv)
+        tmp_parquet.replace(out_parquet)
 
     # Prefer official export when the site advertises more rows than we have locally.
     total_remote = _fetch_total_entries(args.timeout)
@@ -680,15 +688,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     catalog = build_catalog(catalog_rows)
     _flush(catalog)
 
-    fieldnames = ["brand_name", "product_name", "company_name", "registration_number"]
-    out_parquet = out_csv.with_suffix(".parquet")
-    table = pa.Table.from_pylist(catalog, schema=pa.schema([(name, pa.string()) for name in fieldnames]))
-    pq.write_table(table, out_parquet)
-
     inputs_dir = MODULE_ROOT.parent.parent / "inputs" / "drugs"
     try:
         inputs_dir.mkdir(parents=True, exist_ok=True)
-        for path in [out_csv, out_parquet]:
+        for path in [out_parquet, out_csv]:
             if path.is_file():
                 shutil.copy2(path, inputs_dir / path.name)
     except Exception:
@@ -705,8 +708,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             action=action,
             page=page_size,
             raw=export_path if download_rows is not None else raw_path,
-            processed=out_csv,
-            count=len(catalog),
+            processed=out_parquet,
+            count=catalog.height,
         )
     )
     return 0
