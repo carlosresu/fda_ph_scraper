@@ -15,10 +15,20 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import requests
 
-from .text_utils import normalize_text
-from .routes_forms import FORM_TO_ROUTE, parse_form_from_text
-
 MODULE_ROOT = Path(__file__).resolve().parent
+
+# Allow running as a standalone script (python drug_scraper.py) or as a package module.
+try:
+    from .text_utils import normalize_text
+    from .routes_forms import FORM_TO_ROUTE, parse_form_from_text
+except ImportError:
+    import sys
+
+    if str(MODULE_ROOT) not in sys.path:
+        sys.path.insert(0, str(MODULE_ROOT))
+    from text_utils import normalize_text
+    from routes_forms import FORM_TO_ROUTE, parse_form_from_text
+
 DEFAULT_OUTPUT_DIR = MODULE_ROOT / "output"
 RAW_DIR = MODULE_ROOT / "raw"
 
