@@ -1,3 +1,3 @@
-"""Utilities for FDA PH data scraping."""
+"""Polars-based utilities for FDA PH data scraping."""
 
 __all__ = ["food_scraper", "drug_scraper"]

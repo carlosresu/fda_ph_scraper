@@ -249,7 +249,9 @@ def build_brand_map(df: pl.DataFrame) -> pl.DataFrame:
 
 def main() -> None:
     """CLI wrapper that downloads, normalizes, and writes the brand-map export."""
-    ap = argparse.ArgumentParser(description="Build FDA PH brand→generic map (CSV + Parquet export)")
+    ap = argparse.ArgumentParser(
+        description="Build FDA PH brand→generic map with Polars (CSV + Parquet export)"
+    )
     ap.add_argument("--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory")
     ap.add_argument("--outfile", default=None, help="Optional explicit output CSV filename")
     args = ap.parse_args()
