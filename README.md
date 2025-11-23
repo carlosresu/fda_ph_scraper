@@ -11,6 +11,8 @@ Collection of tools that scrape the FDA Philippines food and drug catalogs, norm
 
 ## Setup
 
+The repo root installers (`install_requirements.ps1` on Windows, `install_requirements.sh` on macOS/Linux) will set up this scraper automatically as part of the global environment bootstrap. To install just this module’s dependencies manually:
+
 ```bash
 cd /path/to/esoa/dependencies/fda_ph_scraper
 python -m pip install -r requirements.txt
