@@ -187,6 +187,7 @@ def infer_form_and_route(dosage_form: Optional[str]) -> (Optional[str], Optional
 # Cache for DrugBank data loaded from file
 _DRUGBANK_GENERICS_CACHE: Optional[set] = None
 _DRUGBANK_SYNONYMS_CACHE: Optional[Dict[str, str]] = None
+_DRUGBANK_AUTOMATON_CACHE = None
 
 
 def _load_drugbank_data() -> Tuple[set, Dict[str, str]]:
@@ -251,31 +252,6 @@ def _load_drugbank_data() -> Tuple[set, Dict[str, str]]:
             except Exception as e:
                 print(f"[fda_drug] Warning: Could not load DrugBank data from {path}: {e}")
     
-    # Fallback to common generics if DrugBank not available
-    if not generics:
-        generics = {
-            "ACETAMINOPHEN", "ACETYLCYSTEINE", "ACYCLOVIR", "ALBENDAZOLE", "ALBUTEROL",
-            "ALENDRONATE", "ALLOPURINOL", "ALPRAZOLAM", "AMBROXOL", "AMIKACIN",
-            "AMLODIPINE", "AMOXICILLIN", "AMPICILLIN", "ASPIRIN", "ATENOLOL",
-            "ATORVASTATIN", "AZITHROMYCIN", "CAPTOPRIL", "CARBAMAZEPINE", "CARVEDILOL",
-            "CEFIXIME", "CEFTRIAXONE", "CEFUROXIME", "CETIRIZINE", "CIPROFLOXACIN",
-            "CLARITHROMYCIN", "CLINDAMYCIN", "CLOPIDOGREL", "DICLOFENAC", "DOXYCYCLINE",
-            "ENALAPRIL", "ERYTHROMYCIN", "ESOMEPRAZOLE", "FAMOTIDINE", "FENOFIBRATE",
-            "FLUCONAZOLE", "FUROSEMIDE", "GABAPENTIN", "GLIBENCLAMIDE", "GLICLAZIDE",
-            "GLIMEPIRIDE", "IBUPROFEN", "IRBESARTAN", "KETOROLAC", "LANSOPRAZOLE",
-            "LEVOCETIRIZINE", "LEVOFLOXACIN", "LISINOPRIL", "LOSARTAN", "LOVASTATIN",
-            "MEFENAMIC ACID", "MELOXICAM", "METFORMIN", "METOPROLOL", "METRONIDAZOLE",
-            "MONTELUKAST", "NAPROXEN", "NIFEDIPINE", "OMEPRAZOLE", "PANTOPRAZOLE",
-            "PARACETAMOL", "PRAVASTATIN", "RANITIDINE", "ROSUVASTATIN", "SALBUTAMOL",
-            "SERTRALINE", "SIMVASTATIN", "TELMISARTAN", "TRAMADOL", "VALSARTAN",
-        }
-        # Add common synonyms manually as fallback
-        synonyms = {
-            "PARACETAMOL": "ACETAMINOPHEN",
-            "SALBUTAMOL": "ALBUTEROL",
-        }
-        print(f"[fda_drug] Using fallback list of {len(generics)} common generics")
-    
     _DRUGBANK_GENERICS_CACHE = generics
     _DRUGBANK_SYNONYMS_CACHE = synonyms
     return generics, synonyms
@@ -293,75 +269,110 @@ def _load_drugbank_synonyms() -> Dict[str, str]:
     return synonyms
 
 
-def _is_likely_generic(name: str, drugbank_generics: Optional[set] = None) -> bool:
-    """Check if a name is likely a generic drug name.
+def _build_aho_automaton(generics: set):
+    """Build Aho-Corasick automaton for exact generic name matching."""
+    global _DRUGBANK_AUTOMATON_CACHE
+    if _DRUGBANK_AUTOMATON_CACHE is not None:
+        return _DRUGBANK_AUTOMATON_CACHE
     
-    Args:
-        name: The name to check
-        drugbank_generics: Optional set of known DrugBank generics (loaded if not provided)
+    try:
+        import ahocorasick
+        automaton = ahocorasick.Automaton()
+        for generic in generics:
+            if generic:
+                automaton.add_word(generic, generic)
+        automaton.make_automaton()
+        _DRUGBANK_AUTOMATON_CACHE = automaton
+        return automaton
+    except ImportError:
+        print("[fda_drug] Warning: ahocorasick not available, using set lookup")
+        return None
+
+
+def _is_exact_generic_match(name: str, automaton, generics: set) -> bool:
+    """
+    Check if name is an EXACT match for a DrugBank generic using Aho-Corasick.
+    
+    This detects cases like:
+    - "Acetylcysteine" (brand) -> exact match to ACETYLCYSTEINE generic -> FLIP
+    - "Biogesic" (brand) -> no match -> OK (even though generic is Paracetamol)
+    - "Amoxicillin (As Trihydrate)" -> base "AMOXICILLIN" matches -> FLIP
+    
+    Brand names that CONTAIN a generic as substring are OK (e.g., "Acetylflux" contains "acetyl").
+    Only exact matches (full word) indicate a flip.
     """
     if not name:
         return False
+    
     upper = name.upper().strip()
     
-    # Load DrugBank generics if not provided
-    if drugbank_generics is None:
-        drugbank_generics = _load_drugbank_generics()
-    
-    # Direct match against DrugBank generics
-    if upper in drugbank_generics:
+    # Direct exact match
+    if upper in generics:
         return True
     
-    # Check for salt forms (e.g., "METFORMIN HYDROCHLORIDE")
+    # Strip salt forms and check base name
+    # e.g., "METFORMIN HYDROCHLORIDE" -> "METFORMIN"
     base = re.sub(r'\s+(HYDROCHLORIDE|HCL|SODIUM|POTASSIUM|CALCIUM|SULFATE|ACETATE|MALEATE|FUMARATE|TARTRATE|CITRATE|PHOSPHATE|CHLORIDE|BESILATE|BESYLATE|MESYLATE|TRIHYDRATE|DIHYDRATE|MONOHYDRATE)\s*$', '', upper, flags=re.IGNORECASE)
-    if base != upper and base in drugbank_generics:
+    if base != upper and base in generics:
         return True
     
     # Check for "AS" salt forms (e.g., "AMLODIPINE AS BESILATE")
     as_match = re.match(r'^(.+?)\s+AS\s+', upper)
     if as_match:
         base = as_match.group(1).strip()
-        if base in drugbank_generics:
+        if base in generics:
             return True
     
     # Check for "(AS SALT)" patterns (e.g., "AMLODIPINE (AS BESILATE)")
     paren_match = re.match(r'^(.+?)\s*\(AS\s+', upper)
     if paren_match:
         base = paren_match.group(1).strip()
-        if base in drugbank_generics:
+        if base in generics:
             return True
     
     # Check for combination patterns (e.g., "IBUPROFEN + PARACETAMOL")
+    # ALL parts must be generics for this to be a flip
     if "+" in upper:
         parts = [p.strip() for p in upper.split("+")]
-        # Strip salt forms from each part
+        all_generic = True
         for part in parts:
             part_base = re.sub(r'\s+(HYDROCHLORIDE|HCL|SODIUM|POTASSIUM|CALCIUM|SULFATE|ACETATE|MALEATE|FUMARATE|TARTRATE|CITRATE|PHOSPHATE|CHLORIDE|BESILATE|BESYLATE|MESYLATE)\s*$', '', part, flags=re.IGNORECASE)
-            if part_base in drugbank_generics:
-                return True
+            if part_base not in generics:
+                all_generic = False
+                break
+        if all_generic:
+            return True
     
     return False
 
 
-def _detect_brand_generic_flip(brand: str, generic: str, drugbank_generics: Optional[set] = None) -> bool:
-    """Detect if brand and generic columns are likely swapped.
+def _detect_brand_generic_flip(brand: str, generic: str, generics: Optional[set] = None, automaton=None) -> bool:
+    """
+    Detect if brand and generic columns are likely swapped.
     
-    Args:
-        brand: The brand name from FDA data
-        generic: The generic name from FDA data
-        drugbank_generics: Optional set of known DrugBank generics
+    Uses EXACT matching - brand names that contain a generic as substring are OK.
+    Only flags when brand IS a generic name (not just contains one).
+    
+    Examples:
+    - brand="Acetylcysteine", generic="Nacel" -> FLIP (brand is exact generic)
+    - brand="Acetylflux", generic="Acetylcysteine" -> OK (brand contains "acetyl" but isn't a generic)
+    - brand="Biogesic", generic="Paracetamol" -> OK (brand is not a generic)
     """
     if not brand or not generic:
         return False
     
     # Load DrugBank generics if not provided
-    if drugbank_generics is None:
-        drugbank_generics = _load_drugbank_generics()
+    if generics is None:
+        generics = _load_drugbank_generics()
     
-    brand_is_generic = _is_likely_generic(brand, drugbank_generics)
-    generic_is_generic = _is_likely_generic(generic, drugbank_generics)
+    # Build automaton if not provided
+    if automaton is None:
+        automaton = _build_aho_automaton(generics)
     
-    # Clear flip: brand column has a known generic, generic column doesn't
+    brand_is_generic = _is_exact_generic_match(brand, automaton, generics)
+    generic_is_generic = _is_exact_generic_match(generic, automaton, generics)
+    
+    # Clear flip: brand column has an exact generic match, generic column doesn't
     if brand_is_generic and not generic_is_generic:
         return True
     
@@ -372,13 +383,15 @@ def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     """Trim, dedupe, and enrich FDA rows for downstream brand→generic lookups.
     
     Also detects and fixes brand/generic column flips by checking against DrugBank generics.
+    Uses EXACT matching - brand names containing generics as substrings are OK.
     """
     seen = set()
     out: List[Dict[str, str]] = []
     flip_count = 0
     
-    # Load DrugBank generics once for all rows
+    # Load DrugBank generics and build automaton once for all rows
     drugbank_generics = _load_drugbank_generics()
+    automaton = _build_aho_automaton(drugbank_generics)
     
     for r in rows:
         brand = (r.get("brand_name") or "").strip()
@@ -386,8 +399,8 @@ def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
         if not brand or not generic:
             continue
 
-        # Detect and fix brand/generic flip
-        if _detect_brand_generic_flip(brand, generic, drugbank_generics):
+        # Detect and fix brand/generic flip using exact matching
+        if _detect_brand_generic_flip(brand, generic, drugbank_generics, automaton):
             brand, generic = generic, brand
             flip_count += 1
 
