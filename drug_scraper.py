@@ -184,17 +184,29 @@ def infer_form_and_route(dosage_form: Optional[str]) -> (Optional[str], Optional
     return form_token, route
 
 
-# Cache for DrugBank generics loaded from file
+# Cache for DrugBank data loaded from file
 _DRUGBANK_GENERICS_CACHE: Optional[set] = None
+_DRUGBANK_SYNONYMS_CACHE: Optional[Dict[str, str]] = None
 
 
-def _load_drugbank_generics() -> set:
-    """Load DrugBank generic names from the master file."""
-    global _DRUGBANK_GENERICS_CACHE
-    if _DRUGBANK_GENERICS_CACHE is not None:
-        return _DRUGBANK_GENERICS_CACHE
+def _load_drugbank_data() -> Tuple[set, Dict[str, str]]:
+    """Load DrugBank generic names and build synonym mapping.
+    
+    Returns:
+        generics: Set of all known generic names (canonical + lexemes)
+        synonyms: Dict mapping each name to its canonical form
+    """
+    global _DRUGBANK_GENERICS_CACHE, _DRUGBANK_SYNONYMS_CACHE
+    if _DRUGBANK_GENERICS_CACHE is not None and _DRUGBANK_SYNONYMS_CACHE is not None:
+        return _DRUGBANK_GENERICS_CACHE, _DRUGBANK_SYNONYMS_CACHE
     
     generics: set = set()
+    synonyms: Dict[str, str] = {}
+    
+    # Build synonym groups by drugbank_id
+    from collections import defaultdict
+    synonym_groups: Dict[str, set] = defaultdict(set)
+    canonical_by_id: Dict[str, str] = {}
     
     # Try to load from pipeline inputs
     possible_paths = [
@@ -205,21 +217,39 @@ def _load_drugbank_generics() -> set:
     for path in possible_paths:
         if path.is_file():
             try:
-                import csv
                 with open(path, "r", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        name = (row.get("canonical_generic_name") or "").strip().upper()
-                        if name:
-                            generics.add(name)
-                        # Also add lexeme variants
+                        db_id = (row.get("drugbank_id") or "").strip()
+                        canonical = (row.get("canonical_generic_name") or "").strip().upper()
                         lexeme = (row.get("lexeme") or "").strip().upper()
-                        if lexeme:
+                        
+                        if not db_id:
+                            continue
+                        
+                        # Track canonical name for this drugbank_id
+                        if canonical and canonical != "NAN":
+                            canonical_by_id[db_id] = canonical
+                            synonym_groups[db_id].add(canonical)
+                            generics.add(canonical)
+                        
+                        # Add lexeme as synonym
+                        if lexeme and lexeme != "NAN":
+                            synonym_groups[db_id].add(lexeme)
                             generics.add(lexeme)
-                print(f"[fda_drug] Loaded {len(generics)} DrugBank generics from {path}")
+                
+                # Build synonym mapping: each name maps to its canonical form
+                for db_id, names in synonym_groups.items():
+                    canonical = canonical_by_id.get(db_id)
+                    if canonical:
+                        for name in names:
+                            if name != canonical:
+                                synonyms[name] = canonical
+                
+                print(f"[fda_drug] Loaded {len(generics)} DrugBank generics, {len(synonyms)} synonyms from {path}")
                 break
             except Exception as e:
-                print(f"[fda_drug] Warning: Could not load DrugBank generics from {path}: {e}")
+                print(f"[fda_drug] Warning: Could not load DrugBank data from {path}: {e}")
     
     # Fallback to common generics if DrugBank not available
     if not generics:
@@ -239,10 +269,28 @@ def _load_drugbank_generics() -> set:
             "PARACETAMOL", "PRAVASTATIN", "RANITIDINE", "ROSUVASTATIN", "SALBUTAMOL",
             "SERTRALINE", "SIMVASTATIN", "TELMISARTAN", "TRAMADOL", "VALSARTAN",
         }
+        # Add common synonyms manually as fallback
+        synonyms = {
+            "PARACETAMOL": "ACETAMINOPHEN",
+            "SALBUTAMOL": "ALBUTEROL",
+        }
         print(f"[fda_drug] Using fallback list of {len(generics)} common generics")
     
     _DRUGBANK_GENERICS_CACHE = generics
+    _DRUGBANK_SYNONYMS_CACHE = synonyms
+    return generics, synonyms
+
+
+def _load_drugbank_generics() -> set:
+    """Load DrugBank generic names from the master file."""
+    generics, _ = _load_drugbank_data()
     return generics
+
+
+def _load_drugbank_synonyms() -> Dict[str, str]:
+    """Load DrugBank synonym mapping (name -> canonical form)."""
+    _, synonyms = _load_drugbank_data()
+    return synonyms
 
 
 def _is_likely_generic(name: str, drugbank_generics: Optional[set] = None) -> bool:
