@@ -184,15 +184,90 @@ def infer_form_and_route(dosage_form: Optional[str]) -> (Optional[str], Optional
     return form_token, route
 
 
+def _is_likely_generic(name: str) -> bool:
+    """Check if a name is likely a generic drug name."""
+    if not name:
+        return False
+    upper = name.upper().strip()
+    
+    # Known generics that are commonly flipped in FDA data
+    KNOWN_GENERICS = {
+        "ACETAMINOPHEN", "ACETYLCYSTEINE", "ACYCLOVIR", "ALBENDAZOLE", "ALBUTEROL",
+        "ALENDRONATE", "ALLOPURINOL", "ALPRAZOLAM", "AMBROXOL", "AMIKACIN",
+        "AMLODIPINE", "AMOXICILLIN", "AMPICILLIN", "ASPIRIN", "ATENOLOL",
+        "ATORVASTATIN", "AZITHROMYCIN", "CAPTOPRIL", "CARBAMAZEPINE", "CARVEDILOL",
+        "CEFIXIME", "CEFTRIAXONE", "CEFUROXIME", "CETIRIZINE", "CIPROFLOXACIN",
+        "CLARITHROMYCIN", "CLINDAMYCIN", "CLOPIDOGREL", "DICLOFENAC", "DOXYCYCLINE",
+        "ENALAPRIL", "ERYTHROMYCIN", "ESOMEPRAZOLE", "FAMOTIDINE", "FENOFIBRATE",
+        "FLUCONAZOLE", "FUROSEMIDE", "GABAPENTIN", "GLIBENCLAMIDE", "GLICLAZIDE",
+        "GLIMEPIRIDE", "IBUPROFEN", "IRBESARTAN", "KETOROLAC", "LANSOPRAZOLE",
+        "LEVOCETIRIZINE", "LEVOFLOXACIN", "LISINOPRIL", "LOSARTAN", "LOVASTATIN",
+        "MEFENAMIC ACID", "MELOXICAM", "METFORMIN", "METOPROLOL", "METRONIDAZOLE",
+        "MONTELUKAST", "NAPROXEN", "NIFEDIPINE", "OMEPRAZOLE", "PANTOPRAZOLE",
+        "PARACETAMOL", "PRAVASTATIN", "RANITIDINE", "ROSUVASTATIN", "SALBUTAMOL",
+        "SERTRALINE", "SIMVASTATIN", "TELMISARTAN", "TRAMADOL", "VALSARTAN",
+    }
+    
+    # Check against known generics
+    if upper in KNOWN_GENERICS:
+        return True
+    
+    # Check for salt forms (e.g., "METFORMIN HYDROCHLORIDE")
+    import re
+    base = re.sub(r'\s+(HYDROCHLORIDE|HCL|SODIUM|POTASSIUM|CALCIUM|SULFATE|ACETATE|MALEATE|FUMARATE|TARTRATE|CITRATE|PHOSPHATE|CHLORIDE|BESILATE|BESYLATE|MESYLATE)\s*$', '', upper, flags=re.IGNORECASE)
+    if base in KNOWN_GENERICS:
+        return True
+    
+    # Check for "AS" salt forms (e.g., "AMLODIPINE AS BESILATE")
+    as_match = re.match(r'^(.+?)\s+AS\s+', upper)
+    if as_match:
+        base = as_match.group(1).strip()
+        if base in KNOWN_GENERICS:
+            return True
+    
+    # Check for combination patterns (e.g., "IBUPROFEN + PARACETAMOL")
+    if "+" in upper:
+        parts = [p.strip() for p in upper.split("+")]
+        if any(p in KNOWN_GENERICS for p in parts):
+            return True
+    
+    return False
+
+
+def _detect_brand_generic_flip(brand: str, generic: str) -> bool:
+    """Detect if brand and generic columns are likely swapped."""
+    if not brand or not generic:
+        return False
+    
+    brand_is_generic = _is_likely_generic(brand)
+    generic_is_generic = _is_likely_generic(generic)
+    
+    # Clear flip: brand column has a known generic, generic column doesn't
+    if brand_is_generic and not generic_is_generic:
+        return True
+    
+    return False
+
+
 def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    """Trim, dedupe, and enrich FDA rows for downstream brand→generic lookups."""
+    """Trim, dedupe, and enrich FDA rows for downstream brand→generic lookups.
+    
+    Also detects and fixes brand/generic column flips.
+    """
     seen = set()
     out: List[Dict[str, str]] = []
+    flip_count = 0
+    
     for r in rows:
         brand = (r.get("brand_name") or "").strip()
         generic = (r.get("generic_name") or "").strip()
         if not brand or not generic:
             continue
+
+        # Detect and fix brand/generic flip
+        if _detect_brand_generic_flip(brand, generic):
+            brand, generic = generic, brand
+            flip_count += 1
 
         dosage_form = (r.get("dosage_form") or "").strip()
         dosage_strength = (r.get("dosage_strength") or "").strip()
@@ -221,6 +296,10 @@ def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
                 "registration_number": regno,
             }
         )
+    
+    if flip_count > 0:
+        print(f"[fda_drug] Fixed {flip_count} brand/generic flips")
+    
     return out
 
 
