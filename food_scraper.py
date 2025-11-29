@@ -615,19 +615,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     outdir.mkdir(parents=True, exist_ok=True)
 
+    # Find existing catalog - check today's file first, then any previous file
     existing_rows: List[Dict[str, str]] = []
-    if out_csv.exists():
-        if args.force:
-            if not args.quiet:
-                print(f"Discarding existing catalog at {out_csv} (--force).", flush=True)
-            out_csv.unlink()
-        else:
-            existing_rows = _load_existing_catalog(out_csv)
-            if not args.quiet:
-                print(
-                    f"Resuming from {len(existing_rows):,} previously scraped rows at {out_csv}.",
-                    flush=True,
-                )
+    existing_catalog_path: Optional[Path] = None
+    
+    if out_csv.exists() and not args.force:
+        existing_catalog_path = out_csv
+    elif not args.force:
+        # Look for any existing fda_food_*.csv (not export files)
+        existing_files = sorted(
+            [p for p in outdir.glob("fda_food_*.csv") if "export" not in p.name],
+            reverse=True  # Most recent first
+        )
+        if existing_files:
+            existing_catalog_path = existing_files[0]
+    
+    if existing_catalog_path:
+        existing_rows = _load_existing_catalog(existing_catalog_path)
+        if not args.quiet:
+            print(f"Found {len(existing_rows):,} rows in {existing_catalog_path.name}.", flush=True)
+    elif args.force and out_csv.exists():
+        if not args.quiet:
+            print(f"Discarding existing catalog at {out_csv} (--force).", flush=True)
+        out_csv.unlink()
 
     fieldnames = ["brand_name", "product_name", "company_name", "registration_number"]
 
@@ -640,19 +650,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             writer.writerows(catalog_snapshot)
         tmp_path.replace(out_csv)
 
+    # Initialize variables that may be used in final output
+    download_rows: Optional[List[Dict[str, str]]] = None
+    export_path: Optional[Path] = None
+    html_pages: List[str] = []
+    page_size = PAGE_SIZES[0]
+    
     # If we have existing rows and not forcing, use cached data (skip download/scrape)
     if existing_rows and not args.force:
         if not args.quiet:
             print(f"[cache] Using {len(existing_rows):,} cached rows (use --force to refresh).", flush=True)
         catalog_rows = existing_rows
-        html_pages: List[str] = []
-        page_size = PAGE_SIZES[0]
     else:
         # Try official export when the site advertises more rows than we have locally.
         total_remote = _fetch_total_entries(args.timeout)
         download_needed = (not existing_rows) or (total_remote is not None and len(existing_rows) < total_remote)
-        download_rows: Optional[List[Dict[str, str]]] = None
-        export_path: Optional[Path] = None
         download_error: Optional[str] = None
         if download_needed:
             download_rows, export_path, download_error = _download_export_if_needed(
