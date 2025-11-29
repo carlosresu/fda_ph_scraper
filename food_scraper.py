@@ -640,42 +640,59 @@ def main(argv: Optional[List[str]] = None) -> int:
             writer.writerows(catalog_snapshot)
         tmp_path.replace(out_csv)
 
-    # Prefer official export when the site advertises more rows than we have locally.
-    total_remote = _fetch_total_entries(args.timeout)
-    download_needed = (not existing_rows) or (total_remote is not None and len(existing_rows) < total_remote)
-    download_rows: Optional[List[Dict[str, str]]] = None
-    export_path: Optional[Path] = None
-    download_error: Optional[str] = None
-    if download_needed:
-        download_rows, export_path, download_error = _download_export_if_needed(
-            total_remote=total_remote,
-            existing_count=len(existing_rows),
-            outdir=outdir,
-            timeout=300,
-            quiet=args.quiet,
-        )
-
-    if download_rows is not None:
-        catalog_rows = download_rows
+    # If we have existing rows and not forcing, use cached data (skip download/scrape)
+    if existing_rows and not args.force:
+        if not args.quiet:
+            print(f"[cache] Using {len(existing_rows):,} cached rows (use --force to refresh).", flush=True)
+        catalog_rows = existing_rows
         html_pages: List[str] = []
         page_size = PAGE_SIZES[0]
-    elif download_needed:
-        if not args.allow_scrape:
-            reason = download_error or "download failed"
-            raise RuntimeError(
-                f"FDA food export download unavailable ({reason}); scraping disabled (use --allow-scrape to allow fallback)."
-            )
-        rows, html_pages, page_size = scrape_food_catalog(
-            timeout=args.timeout,
-            verbose=not args.quiet,
-            existing_rows=existing_rows,
-            flush=_flush,
-        )
-        catalog_rows = rows
     else:
-        catalog_rows = existing_rows
-        html_pages = []
-        page_size = PAGE_SIZES[0]
+        # Try official export when the site advertises more rows than we have locally.
+        total_remote = _fetch_total_entries(args.timeout)
+        download_needed = (not existing_rows) or (total_remote is not None and len(existing_rows) < total_remote)
+        download_rows: Optional[List[Dict[str, str]]] = None
+        export_path: Optional[Path] = None
+        download_error: Optional[str] = None
+        if download_needed:
+            download_rows, export_path, download_error = _download_export_if_needed(
+                total_remote=total_remote,
+                existing_count=len(existing_rows),
+                outdir=outdir,
+                timeout=60,  # Reduced from 300s - fail fast
+                quiet=args.quiet,
+            )
+
+        if download_rows is not None:
+            catalog_rows = download_rows
+            html_pages = []
+            page_size = PAGE_SIZES[0]
+        elif download_needed:
+            if not args.allow_scrape:
+                reason = download_error or "download failed"
+                # If we have ANY existing rows, use them instead of failing
+                if existing_rows:
+                    if not args.quiet:
+                        print(f"[fallback] Download failed ({reason}); using {len(existing_rows):,} cached rows.", flush=True)
+                    catalog_rows = existing_rows
+                    html_pages = []
+                    page_size = PAGE_SIZES[0]
+                else:
+                    raise RuntimeError(
+                        f"FDA food export download unavailable ({reason}); no cached data available. Use --allow-scrape for fallback."
+                    )
+            else:
+                rows, html_pages, page_size = scrape_food_catalog(
+                    timeout=args.timeout,
+                    verbose=not args.quiet,
+                    existing_rows=existing_rows,
+                    flush=_flush,
+                )
+                catalog_rows = rows
+        else:
+            catalog_rows = existing_rows
+            html_pages = []
+            page_size = PAGE_SIZES[0]
 
     catalog = build_catalog(catalog_rows)
     _flush(catalog)
