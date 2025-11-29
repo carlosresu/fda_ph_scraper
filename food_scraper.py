@@ -55,6 +55,43 @@ DEFAULT_TIMEOUT = None
 
 RECORD_SUMMARY_RX = re.compile(r"Records\s+\d+\s+to\s+([\d,]+)\s+of\s+([\d,]+)", re.IGNORECASE)
 
+# Pattern to match dated files: name_YYYY-MM-DD.ext
+DATED_FILE_PATTERN = re.compile(r"^(.+?)_(\d{4}-\d{2}-\d{2})(?:_.*)?(\.\w+)$")
+
+
+def _purge_old_dated_files(directory: Path, quiet: bool = True) -> int:
+    """Remove all but the latest version of dated files."""
+    if not directory.exists():
+        return 0
+    
+    groups: Dict[Tuple[str, str], List[Tuple[str, Path]]] = {}
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        match = DATED_FILE_PATTERN.match(path.name)
+        if match:
+            base_name, date_str, ext = match.groups()
+            key = (base_name, ext)
+            if key not in groups:
+                groups[key] = []
+            groups[key].append((date_str, path))
+    
+    deleted = 0
+    for (base_name, ext), files in groups.items():
+        if len(files) <= 1:
+            continue
+        files.sort(key=lambda x: x[0], reverse=True)
+        latest_date, latest_path = files[0]
+        for date_str, path in files[1:]:
+            try:
+                path.unlink()
+                deleted += 1
+                if not quiet:
+                    print(f"[purge] Removed: {path.name}")
+            except Exception:
+                pass
+    return deleted
+
 
 def _render_progress(
     prefix: str,
@@ -614,6 +651,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     outdir.mkdir(parents=True, exist_ok=True)
+    
+    # Auto-purge old dated files
+    _purge_old_dated_files(outdir, quiet=args.quiet)
 
     # Find existing catalog - check today's file first, then any previous file
     existing_rows: List[Dict[str, str]] = []
