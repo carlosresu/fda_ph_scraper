@@ -16,18 +16,28 @@ import pyarrow.parquet as pq
 import requests
 
 MODULE_ROOT = Path(__file__).resolve().parent
+SCRIPTS_DIR = MODULE_ROOT / "scripts"
 
-# Allow running as a standalone script (python drug_scraper.py) or as a package module.
+# Import shared utilities - prefer synced scripts from main esoa repo
+import sys
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.insert(0, str(MODULE_ROOT))
+
 try:
-    from .text_utils import normalize_text
-    from .routes_forms import FORM_TO_ROUTE, parse_form_from_text
+    # First try synced scripts (from main esoa repo)
+    from scripts.text_utils import normalize_text
+    from scripts.routes_forms import FORM_TO_ROUTE, parse_form_from_text
 except ImportError:
-    import sys
-
-    if str(MODULE_ROOT) not in sys.path:
-        sys.path.insert(0, str(MODULE_ROOT))
-    from text_utils import normalize_text
-    from routes_forms import FORM_TO_ROUTE, parse_form_from_text
+    try:
+        # Fall back to package import
+        from .text_utils import normalize_text
+        from .routes_forms import FORM_TO_ROUTE, parse_form_from_text
+    except ImportError:
+        # Fall back to standalone import (legacy)
+        from text_utils import normalize_text
+        from routes_forms import FORM_TO_ROUTE, parse_form_from_text
 
 DEFAULT_OUTPUT_DIR = MODULE_ROOT / "output"
 RAW_DIR = MODULE_ROOT / "raw"
