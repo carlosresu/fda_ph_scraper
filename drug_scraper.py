@@ -202,51 +202,60 @@ def _load_drugbank_data() -> Tuple[set, Dict[str, str]]:
     
     # Build synonym groups by drugbank_id
     from collections import defaultdict
-    synonym_groups: Dict[str, set] = defaultdict(set)
     canonical_by_id: Dict[str, str] = {}
     
-    # Try to load from pipeline inputs
-    possible_paths = [
-        MODULE_ROOT.parent.parent / "inputs" / "drugs" / "drugbank_generics_master.csv",
-        MODULE_ROOT / "output" / "drugbank_generics_master.csv",
+    # Try to load from pipeline inputs (lean exports)
+    inputs_dir = MODULE_ROOT.parent.parent / "inputs" / "drugs"
+    
+    # Load generics
+    generics_paths = [
+        inputs_dir / "generics_lean.csv",
+        MODULE_ROOT / "output" / "generics_lean.csv",
     ]
     
-    for path in possible_paths:
+    for path in generics_paths:
         if path.is_file():
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     reader = csv.DictReader(f)
                     for row in reader:
                         db_id = (row.get("drugbank_id") or "").strip()
-                        canonical = (row.get("canonical_generic_name") or "").strip().upper()
-                        lexeme = (row.get("lexeme") or "").strip().upper()
+                        name = (row.get("name") or "").strip().upper()
                         
-                        if not db_id:
-                            continue
-                        
-                        # Track canonical name for this drugbank_id
-                        if canonical and canonical != "NAN":
-                            canonical_by_id[db_id] = canonical
-                            synonym_groups[db_id].add(canonical)
-                            generics.add(canonical)
-                        
-                        # Add lexeme as synonym
-                        if lexeme and lexeme != "NAN":
-                            synonym_groups[db_id].add(lexeme)
-                            generics.add(lexeme)
+                        if db_id and name and name != "NAN":
+                            canonical_by_id[db_id] = name
+                            generics.add(name)
                 
-                # Build synonym mapping: each name maps to its canonical form
-                for db_id, names in synonym_groups.items():
-                    canonical = canonical_by_id.get(db_id)
-                    if canonical:
-                        for name in names:
-                            if name != canonical:
-                                synonyms[name] = canonical
-                
-                print(f"[fda_drug] Loaded {len(generics)} DrugBank generics, {len(synonyms)} synonyms from {path}")
+                print(f"[fda_drug] Loaded {len(generics)} DrugBank generics from {path}")
                 break
             except Exception as e:
-                print(f"[fda_drug] Warning: Could not load DrugBank data from {path}: {e}")
+                print(f"[fda_drug] Warning: Could not load generics from {path}: {e}")
+    
+    # Load synonyms
+    synonyms_paths = [
+        inputs_dir / "synonyms_lean.csv",
+        MODULE_ROOT / "output" / "synonyms_lean.csv",
+    ]
+    
+    for path in synonyms_paths:
+        if path.is_file():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        db_id = (row.get("drugbank_id") or "").strip()
+                        synonym = (row.get("synonym") or "").strip().upper()
+                        
+                        if db_id and synonym and synonym != "NAN":
+                            canonical = canonical_by_id.get(db_id)
+                            if canonical and synonym != canonical:
+                                synonyms[synonym] = canonical
+                            generics.add(synonym)
+                
+                print(f"[fda_drug] Loaded {len(synonyms)} synonyms from {path}")
+                break
+            except Exception as e:
+                print(f"[fda_drug] Warning: Could not load synonyms from {path}: {e}")
     
     _DRUGBANK_GENERICS_CACHE = generics
     _DRUGBANK_SYNONYMS_CACHE = synonyms
