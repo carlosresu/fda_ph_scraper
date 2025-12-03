@@ -11,8 +11,7 @@ from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pandas as pd
 import requests
 
 MODULE_ROOT = Path(__file__).resolve().parent
@@ -445,7 +444,7 @@ def build_brand_map(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
 def main() -> None:
     """CLI wrapper that downloads, normalizes, and writes the brand-map export."""
-    ap = argparse.ArgumentParser(description="Build FDA PH brand→generic map (CSV + Parquet export)")
+    ap = argparse.ArgumentParser(description="Build FDA PH brand→generic map (CSV export)")
     ap.add_argument("--outdir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory")
     ap.add_argument("--outfile", default=None, help="Optional explicit output CSV filename")
     args = ap.parse_args()
@@ -464,13 +463,11 @@ def main() -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(brand_map)
-    table = pa.Table.from_pylist(brand_map, schema=pa.schema([(name, pa.string()) for name in fieldnames]))
-    pq.write_table(table, out_csv.with_suffix(".parquet"))
 
     inputs_dir = MODULE_ROOT.parent.parent / "inputs" / "drugs"
     try:
         inputs_dir.mkdir(parents=True, exist_ok=True)
-        for path in [out_csv, out_csv.with_suffix(".parquet")]:
+        for path in [out_csv]:
             if path.is_file():
                 shutil.copy2(path, inputs_dir / path.name)
     except Exception:

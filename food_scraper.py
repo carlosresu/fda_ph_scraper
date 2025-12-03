@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import pandas as pd
 import requests
 
 MODULE_ROOT = Path(__file__).resolve().parent
@@ -750,14 +749,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     _flush(catalog)
 
     fieldnames = ["brand_name", "product_name", "company_name", "registration_number"]
-    out_parquet = out_csv.with_suffix(".parquet")
-    table = pa.Table.from_pylist(catalog, schema=pa.schema([(name, pa.string()) for name in fieldnames]))
-    pq.write_table(table, out_parquet)
 
     inputs_dir = MODULE_ROOT.parent.parent / "inputs" / "drugs"
     try:
         inputs_dir.mkdir(parents=True, exist_ok=True)
-        for path in [out_csv, out_parquet]:
+        for path in [out_csv]:
             if path.is_file():
                 shutil.copy2(path, inputs_dir / path.name)
     except Exception:
