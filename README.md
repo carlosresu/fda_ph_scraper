@@ -1,45 +1,38 @@
-# FDA PH Scraper
+# FDA Philippines catalog scrapers (PIDS DRG)
 
-Collection of tools that scrape the FDA Philippines food and drug catalogs, normalise the output, and drop the resulting CSVs under this module’s own `output/` directory. Downstream automation (e.g., `run_all.py`) then mirrors those exports into `inputs/drugs/`. This folder is intended to become its own GitHub submodule (`carlosresu/fda_ph_scraper`) so it can be shared across projects; the current copy mirrors the content that would live inside that submodule.
+Tools to pull the FDA Philippines drug and food catalogs, normalize them, and emit CSVs consumed by the PIDS DRG pipelines. Raw downloads stay inside this submodule so runs are reproducible.
 
-## Layout
-
-- `food_scraper.py` – paginated HTML scraper for the food catalog
-- `drug_scraper.py` – CSV downloader that builds the brand→generic export
-- `routes_forms.py`, `text_utils.py` – portable helpers consumed by the two scrapers
-- `requirements.txt` / `install_requirements.py` – helper to bootstrap the Python dependencies
+## What’s here
+- `drug_scraper.py` – downloads the FDA CSV export for human drugs, extracts the “as of” date, normalizes column names, and builds a brand → generic map. If DrugBank lean exports (`generics_lean.csv`, `synonyms_lean.csv`) are present in `../inputs/drugs/` (from the DrugBank submodule) it uses them to correct flipped brand/generic pairs.
+- `food_scraper.py` – pulls the FDA food products catalog. Tries the official CSV export first; optional HTML pagination scraper fallback with deduping and cache reuse.
+- `input/unified_constants.py` – shared token/normalization lists used during matching.
+- `raw/` + `output/` – created on demand; hold cached downloads and normalized CSVs.
 
 ## Setup
-
-The repo root installers (`install_requirements.ps1` on Windows, `install_requirements.sh` on macOS/Linux) will set up this scraper automatically as part of the global environment bootstrap. To install just this module’s dependencies manually:
+Python 3.10+ with `requests`, `pandas`, `pyarrow`; `ahocorasick` is optional but speeds up brand/generic detection.
 
 ```bash
-cd /path/to/esoa/dependencies/fda_ph_scraper
-python -m pip install -r requirements.txt
-# or, equivalently
-python install_requirements.py
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt pandas ahocorasick
 ```
 
 ## Usage
-
-Files can be executed directly (the module automatically locates the repository root even when run from within the submodule) or via `python -m`:
+Run scripts from anywhere; they resolve paths relative to this folder.
 
 ```bash
-python -m dependencies.fda_ph_scraper.food_scraper      # writes to dependencies/fda_ph_scraper/output/fda_food_products.csv
-python -m dependencies.fda_ph_scraper.drug_scraper      # writes brand maps to dependencies/fda_ph_scraper/output/fda_brand_map_<date>.csv
+# Drug catalog brand → generic map
+python drug_scraper.py --outdir output
+# Food catalog; enable HTML fallback if the export endpoint is down
+python food_scraper.py --outdir output --allow-scrape
 ```
 
-Each scraper writes raw artifacts under `dependencies/fda_ph_scraper/raw/` so the HTTP downloads stay inside the submodule tree. To feed eSOA directly, copy whatever you need from the module’s `output/` folder into `../inputs/drugs/`.
+Key flags:
+- `--outfile` (both) to override the default dated filename.
+- `--force` (food) to ignore existing outputs and re-download.
+- `--allow-scrape` (food) to page through the site when the CSV export is incomplete.
 
-## Publishing as a Submodule
+Each run writes under `./output/` and copies drug outputs into `../inputs/drugs/` when that directory exists so downstream pipelines can pick them up.
 
-1. Create the [https://github.com/carlosresu/fda_ph_scraper](https://github.com/carlosresu/fda_ph_scraper) repository.
-2. Push the contents of this folder to that repo (`git subtree push` or similar) and tag a release.
-3. Add the published repo as a submodule inside `dependencies/fda_ph_scraper` by running:
-   ```bash
-   git submodule add https://github.com/carlosresu/fda_ph_scraper dependencies/fda_ph_scraper
-   git commit -m "Add FDA PH scraper submodule"
-   ```
-4. Update `.gitmodules` as needed and ensure `dependencies/fda_ph_scraper/install_requirements.py` continues to operate in the new location.
-
-Sensitive artifacts (raw HTML, CSV outputs) are already excluded by `.gitignore`.
+## Notes
+- The drug scraper caches raw FDA exports in `./raw/` keyed by date and reuses them when newer than the site’s advertised date.
+- Be gentle with the FDA site—avoid rapid retries and keep scraping intervals reasonable.
